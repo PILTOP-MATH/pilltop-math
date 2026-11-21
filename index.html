@@ -159,7 +159,7 @@ go=function(p){if(p==='scores'){page=p;render();loadScoreTests().then(()=>{if(pa
 
 
 /* 월간 통계: 읽기 전용. 기존 데이터 입력 기능은 변경하지 않습니다. */
-const statState={mode:'student',studentId:'',classId:'',month:localDate().slice(0,7),testId:'',loaded:false,busy:false,records:[],tests:[],scores:[]};
+const statState={mode:'student',studentId:'',classId:'',month:localDate().slice(0,7),testId:'',loaded:false,busy:false,records:[],tests:[],scores:[],recentTests:[],recentScores:[]};
 function statMonths(month,n=6){const [y,m]=month.split('-').map(Number);return Array.from({length:n},(_,i)=>{const d=new Date(Date.UTC(y,m-n+i,1));return d.toISOString().slice(0,7)})}
 function statMonthEnd(month){const [y,m]=month.split('-').map(Number);return new Date(Date.UTC(y,m,1)).toISOString().slice(0,10)}
 function statMean(nums){return nums.length?nums.reduce((a,b)=>a+b,0)/nums.length:null}
@@ -174,7 +174,7 @@ function renderStatView(){
  if(statState.mode==='student'){
   el.innerHTML=`<section class="panel"><h2>학생별 월간 분석</h2><div class="stat-filter"><label>학생 선택<select id="statStudent"><option value="">학생 선택</option>${statOptions(students,statState.studentId,statStudentLabel)}</select></label><label>조회 월<input id="statMonth" type="month" value="${esc(statState.month)}"></label><button class="primary" onclick="fetchStatistics()">통계 조회</button></div></section><div id="statResult" aria-live="polite"><p class="muted">학생과 조회 월을 선택해 주세요.</p></div><p id="statMessage" class="error" role="status"></p>`;
  }else{
-  el.innerHTML=`<section class="panel"><h2>반 전체 시험 성적 분석</h2><div class="stat-filter"><label>반 선택<select id="statClass" onchange="statClassChanged(this.value)"><option value="">반 선택</option>${statOptions(classes,statState.classId,x=>x.name)}</select></label><label>조회 월<input id="statMonth" type="month" value="${esc(statState.month)}"></label><button class="primary" onclick="fetchStatistics()">통계 조회</button></div><p class="record-help">학생별 출결·숙제 평균은 이 화면에 표시하지 않습니다. 시험 점수와 최근 6개월 반 평균만 비교합니다.</p></section><div id="statResult" aria-live="polite"><p class="muted">반과 조회 월을 선택해 주세요.</p></div><p id="statMessage" class="error" role="status"></p>`;
+  el.innerHTML=`<section class="panel"><h2>반 전체 시험 성적 분석</h2><div class="stat-filter"><label>반 선택<select id="statClass" onchange="statClassChanged(this.value)"><option value="">반 선택</option>${statOptions(classes,statState.classId,x=>x.name)}</select></label><label>조회 월<input id="statMonth" type="month" value="${esc(statState.month)}"></label><button class="primary" onclick="fetchStatistics()">통계 조회</button></div><p class="record-help">학생별 출결·숙제 평균은 이 화면에 표시하지 않습니다. 시험 점수와 최근 3개월 반 평균만 비교합니다.</p></section><div id="statResult" aria-live="polite"><p class="muted">반과 조회 월을 선택해 주세요.</p></div><p id="statMessage" class="error" role="status"></p>`;
  }
 }
 function statClassChanged(id){statState.classId=id;statState.testId='';statState.loaded=false;const el=$('statResult');if(el)el.innerHTML='<p class="muted">통계 조회를 눌러 주세요.</p>'}
@@ -195,7 +195,7 @@ async function fetchStatistics(){
  const sid=$('statStudent')?.value, cid=$('statClass')?.value;
  if(!month||(statState.mode==='student'&&!sid)||(statState.mode==='class'&&!cid)){statNotice('학생 또는 반과 조회 월을 선택해 주세요.');return}
  statState.month=month;if(sid)statState.studentId=sid;if(cid)statState.classId=cid;
- const months=statMonths(month);const start=months[0]+'-01',end=statMonthEnd(month);
+ const months=statMonths(month,statState.mode==='class'?3:6);const start=months[0]+'-01',end=statMonthEnd(month);
  const el=$('statResult');el.innerHTML='<p class="muted">통계를 불러오는 중...</p>';statNotice('');statState.busy=true;
  try{
   const tests=await statAll('monthly_tests','id,class_id,test_name,test_date,max_score',q=>q.gte('test_date',start).lt('test_date',end).order('test_date',{ascending:true}).order('id',{ascending:true}));
@@ -206,6 +206,23 @@ async function fetchStatistics(){
   for(let i=0;i<ids.length;i+=100){
    const chunk=ids.slice(i,i+100);
    scores.push(...await statAll('test_scores','test_id,student_id,score',q=>q.in('test_id',chunk).order('test_id',{ascending:true}).order('student_id',{ascending:true})));
+  }
+  if(statState.mode==='student'){
+   // Find the student's latest six actual attempts, independent of the selected month.
+   const ownAll=await statAll('test_scores','test_id,student_id,score',q=>q.eq('student_id',statState.studentId).order('test_id',{ascending:true}));
+   let ownTests=[];
+   const ownIds=[...new Set(ownAll.map(r=>r.test_id))];
+   for(let i=0;i<ownIds.length;i+=100){
+    const chunk=ownIds.slice(i,i+100);
+    ownTests.push(...await statAll('monthly_tests','id,class_id,test_name,test_date,max_score',q=>q.in('id',chunk).order('test_date',{ascending:false})));
+   }
+   ownTests.sort((a,b)=>b.test_date.localeCompare(a.test_date)||b.id.localeCompare(a.id));
+   const latest=ownTests.slice(0,6).reverse();
+   let recentScores=[];
+   if(latest.length){
+    recentScores=await statAll('test_scores','test_id,student_id,score',q=>q.in('test_id',latest.map(t=>t.id)).order('test_id',{ascending:true}));
+   }
+   statState.recentTests=latest;statState.recentScores=recentScores;
   }
   statState.tests=relevant;statState.records=records;statState.scores=scores;statState.loaded=true;
   if(statState.mode==='student')renderStudentStatistics();else renderClassStatistics();
@@ -232,8 +249,8 @@ function statChart(data,series,{max=100,bar=false,labels=[]}={}){
  svg+='</svg>';
  return `<div class="stat-chart">${svg}</div><div class="stat-legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('')}</div>`;
 }
-function statMonthlyTrend(tests,scores,month,studentId=null){
- const months=statMonths(month),byTest=new Map();
+function statMonthlyTrend(tests,scores,month,studentId=null,count=6){
+ const months=statMonths(month,count),byTest=new Map();
  for(const s of scores){if(!byTest.has(s.test_id))byTest.set(s.test_id,[]);byTest.get(s.test_id).push(s)}
  return months.map(m=>{
   const matching=tests.filter(t=>t.test_date.startsWith(m));
@@ -253,8 +270,15 @@ function renderStudentStatistics(){
  const examScores=newest?statState.scores.filter(x=>x.test_id===newest.id):[];
  const own=examScores.find(x=>x.student_id===s.id);
  const avg=statMean(examScores.map(x=>Number(x.score)));
- const trend=statMonthlyTrend(statState.tests,statState.scores,statState.month,s.id);
- el.innerHTML=`<section class="panel"><h2>${esc(s.name)} 학생 <span class="muted">${esc(s.school||'학교 미입력')} · ${esc(s.grade||'학년 미입력')}</span></h2><div class="stat-cards">${statCard('기록 기준 출석률',regular.length?statFmt(present/regular.length*100,'%'):'—',`${present}/${regular.length}회 출석`)}${statCard('숙제 평균',statFmt(hw,'%'),`평가된 ${rated.length}회만 반영`)}${statCard('최근 시험 점수',own?statFmt(own.score,'점'):'—',newest?newest.test_name:'이번 달 시험 기록 없음')}${statCard('해당 시험 반 평균',statFmt(avg,'점'),newest?`${newest.max_score}점 만점`:'이번 달 시험 기록 없음')}</div><p class="record-help">출석률은 현재 저장된 정규 수업 기록만 기준으로 계산한 임시 수치입니다. 보강은 분모에서 제외하고 지각·결석은 출석으로 인정하지 않습니다. 정확한 출석률은 예정 수업일 연결 후 계산할 수 있습니다. 숙제 미평가는 평균에서 제외됩니다.</p></section><section class="panel"><h2>최근 6개월 시험 성적 추이</h2><p class="record-help">서로 만점이 다른 시험도 비교할 수 있도록 점수를 100점 기준 비율(%)로 환산했습니다. 같은 달 시험이 여러 개면 평균을 사용합니다.</p>${statChart(trend,[{key:'student',name:'학생 점수',color:'#8cc7f2'},{key:'average',name:'해당 시험 반 평균',color:'#e7b27d'}],{labels:['학생 점수','반 평균']})}</section><section class="panel"><h2>선택 월 시험 기록</h2><div class="tablewrap"><table><thead><tr><th>날짜</th><th>시험명</th><th>개인 점수</th><th>반 평균</th><th>평균 대비</th></tr></thead><tbody>${monthly.map(t=>{const arr=statState.scores.filter(x=>x.test_id===t.id),mine=arr.find(x=>x.student_id===s.id),mean=statMean(arr.map(x=>Number(x.score)));return `<tr><td data-label="날짜">${esc(t.test_date)}</td><td data-label="시험">${esc(t.test_name)}</td><td data-label="개인 점수">${mine?statFmt(mine.score,'점'):'—'}</td><td data-label="반 평균">${statFmt(mean,'점')}</td><td data-label="평균 대비">${mine&&mean!==null?statFmt(Number(mine.score)-mean,'점'):'—'}</td></tr>`}).join('')||'<tr><td colspan="5">이번 달 응시한 시험이 없습니다.</td></tr>'}</tbody></table></div></section>`;
+ const trend=statState.recentTests.map(t=>{
+  const entries=statState.recentScores.filter(r=>r.test_id===t.id);
+  const mine=entries.find(r=>r.student_id===s.id);
+  const maximum=Number(t.max_score);
+  return {label:t.test_date.slice(2).replaceAll('-','.')+' '+t.test_name,
+   student:mine?Number(mine.score)/maximum*100:null,
+   average:statMean(entries.map(r=>Number(r.score)/maximum*100))};
+ });
+ el.innerHTML=`<section class="panel"><h2>${esc(s.name)} 학생 <span class="muted">${esc(s.school||'학교 미입력')} · ${esc(s.grade||'학년 미입력')}</span></h2><div class="stat-cards">${statCard('기록 기준 출석률',regular.length?statFmt(present/regular.length*100,'%'):'—',`${present}/${regular.length}회 출석`)}${statCard('숙제 평균',statFmt(hw,'%'),`평가된 ${rated.length}회만 반영`)}${statCard('최근 시험 점수',own?statFmt(own.score,'점'):'—',newest?newest.test_name:'이번 달 시험 기록 없음')}${statCard('해당 시험 반 평균',statFmt(avg,'점'),newest?`${newest.max_score}점 만점`:'이번 달 시험 기록 없음')}</div><p class="record-help">출석률은 현재 저장된 정규 수업 기록만 기준으로 계산한 임시 수치입니다. 보강은 분모에서 제외하고 지각·결석은 출석으로 인정하지 않습니다. 정확한 출석률은 예정 수업일 연결 후 계산할 수 있습니다. 숙제 미평가는 평균에서 제외됩니다.</p></section><section class="panel"><h2>최근 응시 시험 6개 · 성적 추이</h2><p class="record-help">조회 월과 관계없이 실제 응시한 최신 시험 최대 6개를 날짜순으로 표시합니다. 시험 만점이 다르면 100점 기준 비율(%)로 환산하며, 각 시험의 반 평균과 비교합니다.</p>${statChart(trend,[{key:'student',name:'학생 점수',color:'#8cc7f2'},{key:'average',name:'해당 시험 반 평균',color:'#e7b27d'}],{labels:['학생 점수','반 평균']})}</section><section class="panel"><h2>선택 월 시험 기록</h2><div class="tablewrap"><table><thead><tr><th>날짜</th><th>시험명</th><th>개인 점수</th><th>반 평균</th><th>평균 대비</th></tr></thead><tbody>${monthly.map(t=>{const arr=statState.scores.filter(x=>x.test_id===t.id),mine=arr.find(x=>x.student_id===s.id),mean=statMean(arr.map(x=>Number(x.score)));return `<tr><td data-label="날짜">${esc(t.test_date)}</td><td data-label="시험">${esc(t.test_name)}</td><td data-label="개인 점수">${mine?statFmt(mine.score,'점'):'—'}</td><td data-label="반 평균">${statFmt(mean,'점')}</td><td data-label="평균 대비">${mine&&mean!==null?statFmt(Number(mine.score)-mean,'점'):'—'}</td></tr>`}).join('')||'<tr><td colspan="5">이번 달 응시한 시험이 없습니다.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderClassStatistics(){
  const el=$('statResult'),cls=classes.find(x=>x.id===statState.classId);if(!cls)return;
@@ -269,8 +293,8 @@ function renderClassStatistics(){
   html+=`<div class="stat-cards">${statCard('반 평균',statFmt(avg,'점'),`${test.max_score}점 만점`)}${statCard('최고점',statFmt(highest,'점'))}${statCard('응시 인원',entries.length+'명','점수 입력 학생 기준')}${statCard('등록 학생',students.filter(s=>s.class_id===cls.id).length+'명')}</div><h2>학생별 시험 점수 · 높은 점수순</h2>${statChart(data,[{key:'score',name:'학생 점수',color:'#8cc7f2'}],{bar:true,max:Number(test.max_score)})}<p class="record-help">반 평균: ${statFmt(avg,'점')} · 미응시 및 점수 미입력 학생은 제외됩니다.</p><h2 style="margin-top:24px">점수 순위표</h2><div class="tablewrap"><table><thead><tr><th>순위</th><th>이름</th><th>학교</th><th>학년</th><th>점수</th></tr></thead><tbody>${entries.map(x=>{const rank=1+entries.filter(y=>Number(y.score)>Number(x.score)).length;return `<tr><td data-label="순위">${rank}위</td><td data-label="이름">${esc(x.student?.name||'미등록 학생')}</td><td data-label="학교">${esc(x.student?.school||'—')}</td><td data-label="학년">${esc(x.student?.grade||'—')}</td><td data-label="점수">${statFmt(x.score,'점')}</td></tr>`}).join('')||'<tr><td colspan="5">점수가 입력된 학생이 없습니다.</td></tr>'}</tbody></table></div>`;
  }else html+='<p class="muted">선택한 월에 등록된 시험이 없습니다.</p>';
  html+='</section>';
- const trend=statMonthlyTrend(tests,statState.scores,statState.month);
- html+=`<section class="panel"><h2>최근 6개월 반 평균 성적 추이</h2><p class="record-help">서로 만점이 다른 시험은 100점 기준 비율(%)로 환산합니다. 같은 달 여러 시험이 있으면 시험별 반 평균의 평균을 표시합니다.</p>${statChart(trend,[{key:'average',name:'반 평균',color:'#8cc7f2'}],{labels:['반 평균']})}</section>`;
+ const trend=statMonthlyTrend(tests,statState.scores,statState.month,null,3);
+ html+=`<section class="panel"><h2>최근 3개월 반 평균 성적 추이</h2><p class="record-help">서로 만점이 다른 시험은 100점 기준 비율(%)로 환산합니다. 같은 달 여러 시험이 있으면 시험별 반 평균의 평균을 표시합니다.</p>${statChart(trend,[{key:'average',name:'반 평균',color:'#8cc7f2'}],{labels:['반 평균']})}</section>`;
  el.innerHTML=html;
 }
 
